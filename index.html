@@ -71,6 +71,15 @@
         .s { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
         .s label { font: 10px 'Courier New', monospace; color: #888; width: 52px; }
         .s input { width: 64px; }
+        .s select {
+            font: 10px 'Courier New', monospace;
+            color: #888;
+            background: none;
+            border: 1px solid #ccc;
+            border-radius: 2px;
+            padding: 2px 4px;
+            max-width: 120px;
+        }
     </style>
 </head>
 <body>
@@ -81,6 +90,10 @@
     <div id="ui">
         <button class="b on" data-m="drawn">drawn</button>
         <button class="b" data-m="silhouette">silhouette</button>
+        <div class="s">
+            <label>camera</label>
+            <select id="camSelect"></select>
+        </div>
         <div class="s">
             <label>sharpness</label>
             <input type="range" id="rSharp" min="0.5" max="2.5" step="0.1" value="1.4">
@@ -145,27 +158,69 @@
 
         // --- Camera ---
         S.textContent = 'starting camera\u2026';
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
-        });
-        V.srcObject = stream;
-        await new Promise(r => { V.onloadedmetadata = () => { V.play(); r(); }; });
 
-        const W = V.videoWidth, H = V.videoHeight;
-        const N = W * H;
-
-        C.width = W;
-        C.height = H;
-
-        // Full-res processing canvas for video capture
+        let prevResult = null;
+        let W, H, N;
         const vidCvs = document.createElement('canvas');
-        vidCvs.width = W; vidCvs.height = H;
-        const vidCtx = vidCvs.getContext('2d', { willReadFrequently: true });
-
-        // Flip canvas for mirror
+        let vidCtx;
         const flipCvs = document.createElement('canvas');
-        flipCvs.width = W; flipCvs.height = H;
-        const flipCtx = flipCvs.getContext('2d');
+        let flipCtx;
+
+        async function startCamera(deviceId) {
+            // Stop existing stream
+            if (V.srcObject) {
+                V.srcObject.getTracks().forEach(t => t.stop());
+            }
+            const constraints = {
+                video: {
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'user' })
+                }
+            };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            V.srcObject = stream;
+            await new Promise(r => { V.onloadedmetadata = () => { V.play(); r(); }; });
+
+            W = V.videoWidth; H = V.videoHeight; N = W * H;
+            C.width = W; C.height = H;
+            vidCvs.width = W; vidCvs.height = H;
+            vidCtx = vidCvs.getContext('2d', { willReadFrequently: true });
+            flipCvs.width = W; flipCvs.height = H;
+            flipCtx = flipCvs.getContext('2d');
+            prevResult = null;
+        }
+
+        // Populate camera dropdown
+        const camSelect = document.getElementById('camSelect');
+        async function populateCameras() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cams = devices.filter(d => d.kind === 'videoinput');
+            camSelect.innerHTML = '';
+            cams.forEach((cam, i) => {
+                const opt = document.createElement('option');
+                opt.value = cam.deviceId;
+                opt.textContent = cam.label || `Camera ${i + 1}`;
+                camSelect.appendChild(opt);
+            });
+            // Select the currently active camera
+            const activeTrack = V.srcObject?.getVideoTracks()[0];
+            if (activeTrack) {
+                const activeId = activeTrack.getSettings().deviceId;
+                camSelect.value = activeId;
+            }
+        }
+
+        camSelect.onchange = async () => {
+            S.textContent = 'switching camera\u2026';
+            S.style.display = 'flex';
+            S.classList.remove('hidden');
+            await startCamera(camSelect.value);
+            S.classList.add('hidden');
+        };
+
+        await startCamera();
+        await populateCameras();
 
         S.classList.add('hidden');
         setTimeout(() => S.remove(), 1000);
@@ -239,9 +294,6 @@
             }
             return out;
         }
-
-        // Temporal smoothing
-        let prevResult = null;
 
         let last = 0;
 

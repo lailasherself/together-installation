@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>together is a beautiful place to be</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #fff;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+        #c {
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            display: block;
+        }
+        video { display: none; }
+        #title {
+            position: fixed;
+            bottom: 40px;
+            width: 100%;
+            text-align: center;
+            font: italic 26px/1 'Georgia', serif;
+            letter-spacing: 2px;
+            color: #000;
+            opacity: 0.45;
+            pointer-events: none;
+            user-select: none;
+        }
+        #status {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font: 14px 'Courier New', monospace;
+            color: #aaa;
+            background: #fff;
+            z-index: 100;
+            transition: opacity 0.8s;
+        }
+        #status.hidden { opacity: 0; pointer-events: none; }
+        #ui {
+            position: fixed;
+            top: 14px;
+            right: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            opacity: 0.12;
+            transition: opacity 0.3s;
+            z-index: 10;
+        }
+        #ui:hover { opacity: 1; }
+        .b {
+            padding: 4px 10px;
+            background: none;
+            border: 1px solid #ccc;
+            border-radius: 2px;
+            font: 11px/1.4 'Courier New', monospace;
+            color: #888;
+            cursor: pointer;
+            text-align: left;
+        }
+        .b:hover { border-color: #000; color: #000; }
+        .b.on { background: #000; color: #fff; border-color: #000; }
+        .s { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+        .s label { font: 10px 'Courier New', monospace; color: #888; width: 52px; }
+        .s input { width: 64px; }
+    </style>
+</head>
+<body>
+    <div id="status">loading model&hellip;</div>
+    <p id="title">together is a beautiful place to be</p>
+    <canvas id="c"></canvas>
+    <video id="v" autoplay playsinline></video>
+    <div id="ui">
+        <button class="b on" data-m="drawn">drawn</button>
+        <button class="b" data-m="silhouette">silhouette</button>
+        <div class="s">
+            <label>sharpness</label>
+            <input type="range" id="rSharp" min="0.5" max="2.5" step="0.1" value="1.4">
+        </div>
+        <div class="s">
+            <label>detail</label>
+            <input type="range" id="rDetail" min="0.3" max="0.8" step="0.02" value="0.45">
+        </div>
+    </div>
+
+    <script type="module">
+    async function main() {
+        const C = document.getElementById('c');
+        const X = C.getContext('2d');
+        const V = document.getElementById('v');
+        const S = document.getElementById('status');
+
+        let mode = 'drawn', thr = 0.5;
+        // XDoG params
+        let sharpness = 1.4;  // p: sharpness of the edge (higher = sharper/thinner lines)
+        let threshold = 0.45; // epsilon: detail threshold (higher = fewer lines)
+
+        // --- Controls ---
+        document.querySelectorAll('.b').forEach(b =>
+            b.onclick = () => {
+                document.querySelectorAll('.b').forEach(x => x.classList.remove('on'));
+                b.classList.add('on');
+                mode = b.dataset.m;
+            }
+        );
+        document.getElementById('rSharp').oninput = e => sharpness = +e.target.value;
+        document.getElementById('rDetail').oninput = e => threshold = +e.target.value;
+        document.ondblclick = () =>
+            document.fullscreenElement
+                ? document.exitFullscreen()
+                : document.documentElement.requestFullscreen();
+
+        const ss = (lo, hi, x) => {
+            const t = Math.max(0, Math.min(1, (x - lo) / (hi - lo)));
+            return t * t * (3 - 2 * t);
+        };
+
+        // --- Load MediaPipe ---
+        S.textContent = 'loading segmentation model\u2026';
+        const { ImageSegmenter, FilesetResolver } =
+            await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm");
+
+        const resolver = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+
+        const seg = await ImageSegmenter.createFromOptions(resolver, {
+            baseOptions: {
+                modelAssetPath:
+                    "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite",
+                delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            outputCategoryMask: false,
+            outputConfidenceMasks: true
+        });
+
+        // --- Camera ---
+        S.textContent = 'starting camera\u2026';
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
+        });
+        V.srcObject = stream;
+        await new Promise(r => { V.onloadedmetadata = () => { V.play(); r(); }; });
+
+        const W = V.videoWidth, H = V.videoHeight;
+        const N = W * H;
+
+        C.width = W;
+        C.height = H;
+
+        // Full-res processing canvas for video capture
+        const vidCvs = document.createElement('canvas');
+        vidCvs.width = W; vidCvs.height = H;
+        const vidCtx = vidCvs.getContext('2d', { willReadFrequently: true });
+
+        // Flip canvas for mirror
+        const flipCvs = document.createElement('canvas');
+        flipCvs.width = W; flipCvs.height = H;
+        const flipCtx = flipCvs.getContext('2d');
+
+        S.classList.add('hidden');
+        setTimeout(() => S.remove(), 1000);
+
+        // --- XDoG (Extended Difference of Gaussians) ---
+        // Produces clean artistic line art from grayscale images
+        // Based on: "XDoG: An eXtended difference-of-Gaussians compendium"
+
+        // Gaussian blur with configurable sigma using separable passes
+        function gaussianBlur(src, w, h, sigma) {
+            const radius = Math.ceil(sigma * 3);
+            const size = radius * 2 + 1;
+
+            // Build 1D kernel
+            const kernel = new Float32Array(size);
+            let sum = 0;
+            for (let i = 0; i < size; i++) {
+                const x = i - radius;
+                kernel[i] = Math.exp(-(x * x) / (2 * sigma * sigma));
+                sum += kernel[i];
+            }
+            for (let i = 0; i < size; i++) kernel[i] /= sum;
+
+            // Horizontal pass
+            const temp = new Float32Array(w * h);
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    let val = 0;
+                    for (let k = 0; k < size; k++) {
+                        const sx = Math.min(Math.max(x + k - radius, 0), w - 1);
+                        val += src[y * w + sx] * kernel[k];
+                    }
+                    temp[y * w + x] = val;
+                }
+            }
+
+            // Vertical pass
+            const out = new Float32Array(w * h);
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    let val = 0;
+                    for (let k = 0; k < size; k++) {
+                        const sy = Math.min(Math.max(y + k - radius, 0), h - 1);
+                        val += temp[sy * w + x] * kernel[k];
+                    }
+                    out[y * w + x] = val;
+                }
+            }
+            return out;
+        }
+
+        // XDoG: compute line art from grayscale
+        // sigma: base blur, k: blur ratio, p: sharpness, eps: threshold, phi: softness
+        function xdog(gray, w, h, sigma, k, p, eps, phi) {
+            const g1 = gaussianBlur(gray, w, h, sigma);
+            const g2 = gaussianBlur(gray, w, h, sigma * k);
+
+            const out = new Float32Array(w * h);
+            for (let i = 0; i < w * h; i++) {
+                // DoG with sharpness control
+                const d = g1[i] - p * g2[i];
+                const u = (1 + p) * g1[i] - p * g2[i];
+
+                if (u >= eps) {
+                    out[i] = 1; // white
+                } else {
+                    // Soft thresholding with tanh for smooth falloff
+                    out[i] = 1 + Math.tanh(phi * (u - eps));
+                }
+                out[i] = Math.max(0, Math.min(1, out[i]));
+            }
+            return out;
+        }
+
+        // Temporal smoothing
+        let prevResult = null;
+
+        let last = 0;
+
+        function loop(ts) {
+            requestAnimationFrame(loop);
+            if (ts - last < 33 || V.readyState < 2) return;
+            last = ts;
+
+            // --- Segmentation ---
+            const result = seg.segmentForVideo(V, ts);
+            if (!result.confidenceMasks?.length) { result.close(); return; }
+            const maskRaw = result.confidenceMasks[0].getAsFloat32Array();
+            const mask = new Float32Array(maskRaw);
+            result.close();
+
+            // --- Silhouette fast path ---
+            if (mode === 'silhouette') {
+                const img = X.createImageData(W, H);
+                const d = img.data;
+                for (let i = 0, p = 0; i < mask.length; i++, p += 4) {
+                    const v = 255 - Math.round(255 * ss(thr - 0.12, thr + 0.12, mask[i]));
+                    d[p] = d[p + 1] = d[p + 2] = v;
+                    d[p + 3] = 255;
+                }
+                flipCtx.putImageData(img, 0, 0);
+                X.save(); X.translate(W, 0); X.scale(-1, 1);
+                X.drawImage(flipCvs, 0, 0); X.restore();
+                return;
+            }
+
+            // --- Drawn mode: XDoG at full resolution ---
+
+            // Get video pixels at full res
+            vidCtx.drawImage(V, 0, 0, W, H);
+            const vidData = vidCtx.getImageData(0, 0, W, H).data;
+
+            // Grayscale
+            const gray = new Float32Array(N);
+            for (let i = 0, p = 0; i < N; i++, p += 4) {
+                gray[i] = (vidData[p] * 0.299 + vidData[p + 1] * 0.587 + vidData[p + 2] * 0.114) / 255;
+            }
+
+            // XDoG line art
+            // sigma=0.8, k=1.6 (blur ratio), p=sharpness, eps=threshold, phi=5 (soft threshold)
+            const lines = xdog(gray, W, H, 0.8, 1.6, sharpness, threshold, 5.0);
+
+            // Temporal smoothing on the result (reduces flicker)
+            if (prevResult) {
+                const blend = 0.6;
+                for (let i = 0; i < N; i++) {
+                    lines[i] = prevResult[i] * (1 - blend) + lines[i] * blend;
+                }
+            }
+            prevResult = new Float32Array(lines);
+
+            // Smooth the mask heavily for clean boundary (fixes hair blobs)
+            const smoothMask = gaussianBlur(mask, W, H, 4.0);
+
+            // Build output: binary black/white with clean mask
+            const img = X.createImageData(W, H);
+            const d = img.data;
+
+            for (let i = 0, p = 0; i < N; i++, p += 4) {
+                const maskAlpha = ss(thr - 0.04, thr + 0.04, smoothMask[i]);
+
+                if (maskAlpha < 0.01) {
+                    // Background: white
+                    d[p] = d[p + 1] = d[p + 2] = 255;
+                    d[p + 3] = 255;
+                    continue;
+                }
+
+                // Binary threshold: hard black or white, no gray
+                const lineVal = lines[i] < 0.5 ? 0 : 255;
+
+                // Blend at mask boundary for anti-aliasing
+                const val = lineVal * maskAlpha + 255 * (1 - maskAlpha);
+                d[p] = d[p + 1] = d[p + 2] = Math.round(val);
+                d[p + 3] = 255;
+            }
+
+            // Mirror and draw
+            flipCtx.putImageData(img, 0, 0);
+            X.save();
+            X.translate(W, 0);
+            X.scale(-1, 1);
+            X.drawImage(flipCvs, 0, 0);
+            X.restore();
+        }
+
+        requestAnimationFrame(loop);
+    }
+
+    main().catch(err => {
+        const S = document.getElementById('status');
+        if (err.name === 'NotAllowedError' || err.message?.includes('getUserMedia')) {
+            S.textContent = 'camera access denied \u2014 please allow camera and reload';
+        } else {
+            S.textContent = 'error: ' + err.message;
+        }
+        console.error(err);
+    });
+    </script>
+</body>
+</html>

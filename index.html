@@ -89,6 +89,7 @@
     <video id="v" autoplay playsinline></video>
     <div id="ui">
         <button class="b on" data-m="drawn">drawn</button>
+        <button class="b" data-m="scene">scene</button>
         <button class="b" data-m="silhouette">silhouette</button>
         <div class="s">
             <label>camera</label>
@@ -318,6 +319,40 @@
                     d[p] = d[p + 1] = d[p + 2] = v;
                     d[p + 3] = 255;
                 }
+                flipCtx.putImageData(img, 0, 0);
+                X.save(); X.translate(W, 0); X.scale(-1, 1);
+                X.drawImage(flipCvs, 0, 0); X.restore();
+                return;
+            }
+
+            // --- Scene mode: XDoG on entire frame ---
+            if (mode === 'scene') {
+                vidCtx.drawImage(V, 0, 0, W, H);
+                const vidData = vidCtx.getImageData(0, 0, W, H).data;
+
+                const gray = new Float32Array(N);
+                for (let i = 0, p = 0; i < N; i++, p += 4) {
+                    gray[i] = (vidData[p] * 0.299 + vidData[p + 1] * 0.587 + vidData[p + 2] * 0.114) / 255;
+                }
+
+                const lines = xdog(gray, W, H, 0.8, 1.6, sharpness, threshold, 5.0);
+
+                if (prevResult) {
+                    const blend = 0.6;
+                    for (let i = 0; i < N; i++) {
+                        lines[i] = prevResult[i] * (1 - blend) + lines[i] * blend;
+                    }
+                }
+                prevResult = new Float32Array(lines);
+
+                const img = X.createImageData(W, H);
+                const d = img.data;
+                for (let i = 0, p = 0; i < N; i++, p += 4) {
+                    const val = lines[i] < 0.5 ? 0 : 255;
+                    d[p] = d[p + 1] = d[p + 2] = val;
+                    d[p + 3] = 255;
+                }
+
                 flipCtx.putImageData(img, 0, 0);
                 X.save(); X.translate(W, 0); X.scale(-1, 1);
                 X.drawImage(flipCvs, 0, 0); X.restore();
